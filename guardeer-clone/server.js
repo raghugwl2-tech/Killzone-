@@ -1,7 +1,7 @@
 const { createServer } = require("http");
 const WebSocket = require("ws");
 
-const token = "fd1d532d2855af669a759522d244b6fc-c-app";
+const token = "";
 let allTickWs = null;
 let latestTickData = null;
 let heartbeatTimer = null;
