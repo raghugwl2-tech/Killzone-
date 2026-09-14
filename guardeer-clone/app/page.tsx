@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { createChart, ColorType, CandlestickSeries, IChartApi, ISeriesApi } from "lightweight-charts";
 import { 
   BarChart2, 
   Activity, 
@@ -39,67 +40,87 @@ export default function Home() {
   const [trades, setTrades] = useState<TradeItem[]>([]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
 
-  const tvContainerRef = useRef<HTMLDivElement>(null);
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
 
   useEffect(() => {
     const savedTheme = localStorage.getItem("guardeer_theme") as "dark" | "light" | null;
     if (savedTheme) setTheme(savedTheme);
   }, []);
 
-  // Load TradingView Script
+  // Initialize Lightweight Charts (v4+ syntax)
   useEffect(() => {
-    if (!tvContainerRef.current) return;
-    tvContainerRef.current.innerHTML = "";
+    if (!chartContainerRef.current) return;
 
-    const containerId = "tradingview_widget_" + Math.random().toString(36).substring(7);
-    const widgetDiv = document.createElement("div");
-    widgetDiv.id = containerId;
-    widgetDiv.style.height = "100%";
-    widgetDiv.style.width = "100%";
-    tvContainerRef.current.appendChild(widgetDiv);
+    const isDark = theme === "dark";
+    const chart = createChart(chartContainerRef.current, {
+      layout: {
+        background: { type: ColorType.Solid, color: isDark ? '#0B0E11' : '#FFFFFF' },
+        textColor: isDark ? '#9194A1' : '#1E2329',
+      },
+      grid: {
+        vertLines: { color: isDark ? '#1F242D' : '#E6E8EA' },
+        horzLines: { color: isDark ? '#1F242D' : '#E6E8EA' },
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: true,
+      },
+      width: chartContainerRef.current.clientWidth,
+      height: chartContainerRef.current.clientHeight,
+    });
 
-    const script = document.createElement("script");
-    script.src = "https://s3.tradingview.com/tv.js";
-    script.async = true;
-    script.onload = () => {
-      if (typeof (window as any).TradingView !== "undefined") {
-        new (window as any).TradingView.widget({
-          autosize: true,
-          symbol: "OANDA:XAUUSD",
-          interval: timeframe === "1m" ? "1" : timeframe === "5m" ? "5" : timeframe === "15m" ? "15" : timeframe === "1H" ? "60" : "240",
-          timezone: "Etc/UTC",
-          theme: theme,
-          style: "1",
-          locale: "en",
-          toolbar_bg: theme === "dark" ? "#161B22" : "#f1f3f6",
-          enable_publishing: false,
-          hide_side_toolbar: false,
-          allow_symbol_change: true,
-          container_id: containerId,
-          studies: ["Volume@tv-basicstudies"],
+    chartRef.current = chart;
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#00E676',
+      downColor: '#FF355E',
+      borderVisible: false,
+      wickUpColor: '#00E676',
+      wickDownColor: '#FF355E',
+    });
+    candleSeriesRef.current = candleSeries as any;
+
+    // Seed dummy initial history so chart renders immediately
+    const now = Math.floor(Date.now() / 1000);
+    candleSeries.setData([
+      { time: now - 300, open: 2350, high: 2353, low: 2348, close: 2351 },
+      { time: now - 240, open: 2351, high: 2355, low: 2350, close: 2354 },
+      { time: now - 180, open: 2354, high: 2356, low: 2352, close: 2353 },
+      { time: now - 120, open: 2353, high: 2358, low: 2353, close: 2357 },
+      { time: now - 60,  open: 2357, high: 2360, low: 2355, close: 2359 },
+    ]);
+
+    const handleResize = () => {
+      if (chartContainerRef.current) {
+        chart.applyOptions({ 
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight 
         });
       }
     };
+    window.addEventListener('resize', handleResize);
 
-    tvContainerRef.current.appendChild(script);
-  }, [theme, timeframe]);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      chart.remove();
+    };
+  }, [theme]);
 
-  // Connect to local Node.js bridge server via Server-Sent Events (SSE)
+  // Connect to SSE Bridge & Feed Live Ticks into Lightweight Chart
   useEffect(() => {
     let runningDelta = 0;
     let runningCvd = 0;
+    const bridgeUrl = process.env.NEXT_PUBLIC_BRIDGE_URL || "http://localhost:3001";
+    
+    console.log("Attempting to connect to SSE bridge:", bridgeUrl);
+    const eventSource = new EventSource(`${bridgeUrl}/stream`);
 
-    console.log("Attempting to connect to SSE bridge...");
-    const eventSource = new EventSource("http://localhost:3001/stream");
-
-    eventSource.onopen = () => {
-      console.log("SSE Connection Open Successfully!");
-      setIsConnected(true);
-    };
+    eventSource.onopen = () => setIsConnected(true);
 
     eventSource.onmessage = (event) => {
       try {
-        console.log("SSE Data received:", event.data);
         const data = JSON.parse(event.data);
         const price = Number(data.price || 2350.50);
         const volume = Number(data.volume || 1);
@@ -113,6 +134,18 @@ export default function Home() {
 
         setDelta(Number(runningDelta.toFixed(2)));
         setCvd(Number(runningCvd.toFixed(2)));
+
+        // Update Lightweight Chart dynamically with live tick
+        if (candleSeriesRef.current) {
+          const currentTime = Math.floor((data.timestamp || Date.now()) / 1000);
+          candleSeriesRef.current.update({
+            time: currentTime,
+            open: price - 0.2,
+            high: price + 0.5,
+            low: price - 0.5,
+            close: price,
+          });
+        }
 
         const newTrade: TradeItem = {
           id: Math.random().toString(36).substring(7),
@@ -129,14 +162,9 @@ export default function Home() {
       }
     };
 
-    eventSource.onerror = () => {
-      // Silent handling to prevent Next.js error overlay on auto-reconnects
-      setIsConnected(false);
-    };
+    eventSource.onerror = () => setIsConnected(false);
 
-    return () => {
-      eventSource.close();
-    };
+    return () => eventSource.close();
   }, []);
 
   const toggleTheme = () => {
@@ -160,31 +188,25 @@ export default function Home() {
 
   return (
     <div className={`flex h-screen w-screen flex-col overflow-hidden transition-colors duration-200 ${isDark ? "bg-[#0B0E11] text-[#EAECEF]" : "bg-[#F8F9FA] text-[#1E2329]"}`}>
-      {/* Top Header */}
-      <header className={`flex h-12 w-full items-center justify-between border-b px-4 select-none transition-colors duration-200 ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
+      <header className={`flex h-12 w-full items-center justify-between border-b px-4 select-none ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <span className="text-sm font-black tracking-wider text-[#00D4FF]">GUARDEER</span>
             <span className="rounded bg-[#00D4FF]/10 px-1.5 py-0.5 text-[10px] font-bold text-[#00D4FF]">PRIME</span>
           </div>
-
           <div className={`h-4 w-[1px] ${isDark ? "bg-[#1E2329]" : "bg-[#E6E8EA]"}`} />
-
-          <button className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs transition ${isDark ? "bg-[#0B0E11] hover:bg-[#2B313A]" : "bg-[#F0F2F5] hover:bg-[#E6E8EA]"}`}>
-            <span className={`font-bold ${isDark ? "text-white" : "text-black"}`}>XAUUSD</span>
+          <button className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs ${isDark ? "bg-[#0B0E11]" : "bg-[#F0F2F5]"}`}>
+            <span className="font-bold">XAUUSD</span>
             <span className="text-[10px] text-[#848E9C]">${livePrice.toFixed(2)}</span>
             <ChevronDown size={14} className="text-[#848E9C]" />
           </button>
-
           <div className={`flex gap-1 rounded-md p-1 text-xs ${isDark ? "bg-[#0B0E11]" : "bg-[#F0F2F5]"}`}>
             {["1m", "5m", "15m", "1H", "4H", "D"].map((tf) => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}
                 className={`rounded px-2.5 py-1 text-[11px] font-medium transition ${
-                  timeframe === tf 
-                    ? (isDark ? "bg-[#2B313A] text-[#00D4FF] font-semibold" : "bg-[#FFFFFF] text-[#00D4FF] font-semibold shadow-sm") 
-                    : "text-[#848E9C] hover:text-white"
+                  timeframe === tf ? "bg-[#2B313A] text-[#00D4FF] font-semibold" : "text-[#848E9C] hover:text-white"
                 }`}
               >
                 {tf}
@@ -196,21 +218,16 @@ export default function Home() {
         <div className="flex items-center gap-4 text-xs text-[#848E9C]">
           <span className={`flex items-center gap-1.5 ${isConnected ? "text-[#00E676]" : "text-red-500"}`}>
             <span className={`h-2 w-2 rounded-full ${isConnected ? "bg-[#00E676] animate-pulse" : "bg-red-500"}`} />
-            {isConnected ? "BRIDGE STREAM ACTIVE" : "CONNECTING TO BRIDGE..."}
+            {isConnected ? "LIVE STREAM ACTIVE" : "CONNECTING..."}
           </span>
-
-          <div className={`h-4 w-[1px] ${isDark ? "bg-[#1E2329]" : "bg-[#E6E8EA]"}`} />
-
-          <button onClick={toggleTheme} className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${isDark ? "bg-[#0B0E11] text-yellow-400 hover:bg-[#2B313A]" : "bg-[#F0F2F5] text-slate-700 hover:bg-[#E6E8EA]"}`}>
+          <button onClick={toggleTheme} className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#0B0E11] text-yellow-400">
             {isDark ? <Sun size={16} /> : <Moon size={16} />}
           </button>
         </div>
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Left Toolbar */}
-        <aside className={`flex w-14 flex-col items-center gap-1.5 border-r py-3 md:w-48 md:items-stretch md:px-2 select-none transition-colors duration-200 ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
-          <div className="mb-1 hidden px-2 text-[10px] font-bold uppercase tracking-wider text-[#848E9C] md:block">Tools</div>
+        <aside className={`flex w-14 flex-col items-center gap-1.5 border-r py-3 md:w-48 md:items-stretch md:px-2 select-none ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
           {tools.map((tool) => {
             const Icon = tool.icon;
             const isActive = activeTool === tool.id;
@@ -219,9 +236,7 @@ export default function Home() {
                 key={tool.id}
                 onClick={() => setActiveTool(tool.id)}
                 className={`flex items-center gap-3 rounded-lg px-2.5 py-2 text-left transition ${
-                  isActive
-                    ? isDark ? "bg-[#0B0E11] text-[#00D4FF] border-l-2 border-[#00D4FF]" : "bg-[#F0F2F5] text-[#00D4FF] border-l-2 border-[#00D4FF]"
-                    : isDark ? "text-[#848E9C] hover:bg-[#0B0E11]/50 hover:text-white" : "text-[#848E9C] hover:bg-[#F0F2F5] hover:text-black"
+                  isActive ? "bg-[#0B0E11] text-[#00D4FF] border-l-2 border-[#00D4FF]" : "text-[#848E9C] hover:text-white"
                 }`}
               >
                 <Icon size={18} />
@@ -231,83 +246,41 @@ export default function Home() {
           })}
         </aside>
 
-        {/* Main Chart / Workspace Area */}
         <main className={`flex flex-1 flex-col p-2 min-w-0 ${isDark ? "bg-[#0B0E11]" : "bg-[#F8F9FA]"}`}>
-          <div ref={tvContainerRef} className={`h-full w-full rounded-lg border overflow-hidden ${isDark ? "border-[#1E2329]" : "border-[#E6E8EA]"}`} />
+          <div ref={chartContainerRef} className={`h-full w-full rounded-lg border overflow-hidden ${isDark ? "border-[#1E2329]" : "border-[#E6E8EA]"}`} />
         </main>
 
-        {/* Right Sidebar with Live Tape */}
-        <aside className={`hidden w-80 flex-col border-l lg:flex select-none transition-colors duration-200 ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
-          <div className={`flex border-b text-xs font-medium text-[#848E9C] ${isDark ? "border-[#1E2329]" : "border-[#E6E8EA]"}`}>
-            {[
-              { id: "metrics", label: "Live Tape", icon: Activity },
-              { id: "journal", label: "Journal", icon: BookOpen },
-              { id: "alerts", label: "Alerts", icon: ShieldAlert },
-              { id: "calendar", label: "Events", icon: Calendar },
-            ].map((tab) => {
-              const TabIcon = tab.icon;
-              const isActive = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex flex-1 items-center justify-center gap-1.5 py-3 transition ${
-                    isActive ? (isDark ? "border-b-2 border-[#00D4FF] text-white font-semibold" : "border-b-2 border-[#00D4FF] text-black font-semibold") : isDark ? "hover:text-white" : "hover:text-black"
-                  }`}
-                >
-                  <TabIcon size={14} />
-                  {tab.label}
-                </button>
-              );
-            })}
+        <aside className={`hidden w-80 flex-col border-l lg:flex select-none ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
+          <div className="flex border-b text-xs font-medium text-[#848E9C] border-[#1E2329]">
+            <button className="flex flex-1 items-center justify-center gap-1.5 py-3 border-b-2 border-[#00D4FF] text-white font-semibold">
+              <Activity size={14} /> Live Tape
+            </button>
           </div>
-
-          {activeTab === "metrics" ? (
-            <div className="flex flex-1 flex-col overflow-hidden p-3 font-mono text-xs">
-              <div className="mb-2 flex items-center justify-between text-[11px] text-[#848E9C]">
-                <span>TIME & SALES</span>
-                <span className="flex items-center gap-1 text-[#00E676]">
-                  <Radio size={12} className="animate-pulse" />
-                  STREAMING
-                </span>
-              </div>
-
-              <div className="grid grid-cols-3 border-b pb-1 text-[10px] font-bold text-[#848E9C] border-zinc-800">
-                <span>PRICE</span>
-                <span className="text-center">QTY</span>
-                <span className="text-right">TIME</span>
-              </div>
-
-              <div className="flex-1 overflow-y-auto space-y-1 mt-1 pr-1 scrollbar-thin">
-                {trades.map((t) => (
-                  <div 
-                    key={t.id} 
-                    className={`grid grid-cols-3 py-1 px-1.5 rounded text-[11px] transition-colors ${
-                      t.type === "buy" ? "bg-[#00E676]/10 text-[#00E676]" : "bg-[#FF355E]/10 text-[#FF355E]"
-                    }`}
-                  >
-                    <span className="font-bold">${t.price.toFixed(2)}</span>
-                    <span className="text-center">{t.volume}</span>
-                    <span className="text-right text-[10px] text-[#848E9C]">{t.time}</span>
-                  </div>
-                ))}
-              </div>
+          <div className="flex flex-1 flex-col overflow-hidden p-3 font-mono text-xs">
+            <div className="grid grid-cols-3 border-b pb-1 text-[10px] font-bold text-[#848E9C] border-zinc-800">
+              <span>PRICE</span>
+              <span className="text-center">QTY</span>
+              <span className="text-right">TIME</span>
             </div>
-          ) : (
-            <div className="p-4 text-xs text-[#848E9C]">
-              Selected Tab: <span className="text-[#00D4FF] font-medium capitalize">{activeTab}</span>
+            <div className="flex-1 overflow-y-auto space-y-1 mt-1">
+              {trades.map((t) => (
+                <div key={t.id} className={`grid grid-cols-3 py-1 px-1.5 rounded text-[11px] ${t.type === "buy" ? "bg-[#00E676]/10 text-[#00E676]" : "bg-[#FF355E]/10 text-[#FF355E]"}`}>
+                  <span className="font-bold">${t.price.toFixed(2)}</span>
+                  <span className="text-center">{t.volume}</span>
+                  <span className="text-right text-[10px] text-[#848E9C]">{t.time}</span>
+                </div>
+              ))}
             </div>
-          )}
+          </div>
         </aside>
       </div>
 
-      {/* Footer */}
-      <footer className={`flex h-7 w-full items-center justify-between border-t px-4 text-[11px] font-mono text-[#848E9C] select-none transition-colors duration-200 ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
+      <footer className={`flex h-7 w-full items-center justify-between border-t px-4 text-[11px] font-mono text-[#848E9C] select-none ${isDark ? "border-[#1E2329] bg-[#161B22]" : "border-[#E6E8EA] bg-[#FFFFFF]"}`}>
         <div className="flex items-center gap-6">
           <span>DELTA: <strong className={delta >= 0 ? "text-[#00E676]" : "text-[#FF355E]"}>{delta >= 0 ? `+${delta}` : delta}</strong></span>
           <span>CVD: <strong className={cvd >= 0 ? "text-[#00E676]" : "text-[#FF355E]"}>{cvd >= 0 ? `+${cvd}` : cvd}</strong></span>
         </div>
-        <div>MARKET: <strong className={isDark ? "text-white" : "text-black"}>XAUUSD (NODE BRIDGE)</strong></div>
+        <div>MARKET: <strong className="text-white">XAUUSD (ALLTICK INTEGRATED)</strong></div>
       </footer>
     </div>
   );
